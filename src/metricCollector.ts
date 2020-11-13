@@ -59,7 +59,7 @@ export class MetricCollector {
     return new IoRedis(this.redisUri, redisOpts);
   }
 
-  private addToQueueSet(names: string[]): void {
+  private addToQueueSet(names: string[], prefix: string = 'bull'): void {
     for (const name of names) {
       if (this.queuesByName.has(name)) {
         continue;
@@ -67,11 +67,12 @@ export class MetricCollector {
       this.logger.info('added queue', name);
       this.queuesByName.set(name, {
         name,
+        prefix,
         queue: new bull(name, {
           ...this.bullOpts,
+          ...{ prefix },
           createClient: this.createClient.bind(this),
         }),
-        prefix: this.bullOpts.prefix || 'bull',
       });
     }
   }
@@ -80,18 +81,22 @@ export class MetricCollector {
     const keyPattern = new RegExp(`^${this.bullOpts.prefix}:([^:]+):(id|failed|active|waiting|stalled-check)$`);
     this.logger.info({ pattern: keyPattern.source }, 'running queue discovery');
 
-    const keyStream = this.defaultRedisClient.scanStream({
-      match: `${this.bullOpts.prefix}:*:*`,
-    });
-    // tslint:disable-next-line:await-promise tslint does not like Readable's here
-    for await (const keyChunk of keyStream) {
-      for (const key of keyChunk) {
-        const match = keyPattern.exec(key);
-        if (match && match[1]) {
-          this.addToQueueSet([match[1]]);
+    const prefixes = (this.bullOpts.prefix || 'bull').split(',');
+    await prefixes.reduce(async (acc: Promise<void>, prefix: string) => {
+      await acc;
+      const keyStream = this.defaultRedisClient.scanStream({
+        match: `${prefix}:*:*`,
+      });
+      // tslint:disable-next-line:await-promise tslint does not like Readable's here
+      for await (const keyChunk of keyStream) {
+        for (const key of keyChunk) {
+          const match = keyPattern.exec(key);
+          if (match && match[1]) {
+            this.addToQueueSet([match[1]], prefix);
+          }
         }
       }
-    }
+    }, Promise.resolve());
   }
 
   private async onJobComplete(queue: QueueData, id: string): Promise<void> {
